@@ -1,0 +1,23 @@
+# --- Gradle ---
+.gradle/
+/build
+*.iml
+
+# --- IDE - IntelliJ / Android Studio ---
+.idea/
+
+# --- Kotlin ---
+.kotlin/
+
+# --- Android ---
+/local.properties
+local.properties
+/captures
+.externalNativeBuild
+.cxx
+
+# --- Logs ---
+*.log
+
+# --- OS ---
+.DS_Store

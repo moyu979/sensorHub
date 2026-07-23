@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sensorHub OTA 升级</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .upload-area {
+            border: 2px dashed var(--border);
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: var(--bg-card);
+        }
+        .upload-area:hover, .upload-area.dragover {
+            border-color: var(--accent);
+            background: var(--accent-dim);
+        }
+        .upload-area.has-file {
+            border-color: var(--accent);
+            border-style: solid;
+        }
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+        }
+        .upload-area.has-file .upload-icon {
+            color: var(--accent);
+        }
+        .file-info {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+        .file-info .label {
+            color: var(--text-secondary);
+        }
+        .progress-bar {
+            margin-top: 1rem;
+            height: 8px;
+            background: var(--bg-primary);
+            border-radius: 4px;
+            overflow: hidden;
+            display: none;
+        }
+        .progress-bar.active {
+            display: block;
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent), #00aaff);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .log-box {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: #0a0a14;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.85rem;
+            max-height: 250px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            color: var(--text-secondary);
+        }
+        .log-box .success { color: var(--success); }
+        .log-box .error { color: var(--danger); }
+        .log-box .info { color: var(--accent); }
+        .log-box .warn { color: var(--warning); }
+        .btn-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-top: 1rem;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 2rem;
+            border-radius: 8px;
+            border: none;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #0f0f1a;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background: #00e8ba;
+            transform: translateY(-1px);
+        }
+        .btn-danger {
+            background: var(--danger);
+            color: #fff;
+        }
+        .btn-danger:hover:not(:disabled) {
+            background: #ff5252;
+            transform: translateY(-1px);
+        }
+        .btn-secondary {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        .btn-secondary:hover:not(:disabled) {
+            background: var(--border);
+        }
+        .version-info {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+            flex-shrink: 0;
+        }
+        .status-dot.connected { background: var(--success); }
+        .status-dot.disconnected { background: var(--danger); }
+        .status-dot.uploading { background: var(--warning); animation: pulse 1s infinite; }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <h1>sensorHub OTA 升级</h1>
+            <a href="/" class="badge" style="text-decoration:none;">← 监控面板</a>
+        </div>
+    </header>
+
+    <main class="main">
+        <section class="card">
+            <h2>上传固件</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                选择 <code>main.py</code> 文件上传到 RP2040 单片机。
+                上传完成后设备将自动重启，加载新固件。
+            </p>
+
+            <div class="status-bar" id="statusBar">
+                <span class="status-dot disconnected" id="statusDot"></span>
+                <span id="statusText">检查设备连接...</span>
+            </div>
+
+            <div class="upload-area" id="dropZone">
+                <div class="upload-icon">📁</div>
+                <p style="color: var(--text-secondary);">
+                    拖拽文件到此处，或 <strong style="color: var(--accent);">点击选择</strong>
+                </p>
+                <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.5rem;">
+                    仅支持 .py 文件
+                </p>
+                <input type="file" id="fileInput" accept=".py" hidden>
+            </div>
+
+            <div class="file-info" id="fileInfo" style="display:none;">
+                <div><span class="label">文件名：</span><span id="fileName"></span></div>
+                <div><span class="label">大小：</span><span id="fileSize"></span></div>
+                <div><span class="label">CRC32：</span><span id="fileCrc"></span></div>
+            </div>
+
+            <div class="progress-bar" id="progressBar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn btn-primary" id="uploadBtn" disabled>
+                    ⬆ 上传到 RP2040
+                </button>
+                <button class="btn btn-secondary" id="resetBtn">
+                    🔄 重启设备
+                </button>
+            </div>
+
+            <div class="log-box" id="logBox">
+欢迎使用 sensorHub OTA 升级
+选择 main.py 文件后点击上传
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // ===== DOM =====
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const fileCrc = document.getElementById('fileCrc');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const logBox = document.getElementById('logBox');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+
+        let selectedFile = null;
+        let isUploading = false;
+
+        // ===== 工具 =====
+        function log(msg, type = 'info') {
+            const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+            logBox.innerHTML += `\n[${time}] <span class="${type}">${escapeHtml(msg)}</span>`;
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        function escapeHtml(str) {
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            return (bytes / 1024).toFixed(1) + ' KB';
+        }
+
+        function setStatus(text, state) {
+            statusText.textContent = text;
+            statusDot.className = 'status-dot';
+            if (state) statusDot.classList.add(state);
+        }
+
+        // ===== CRC32（浏览器端预计算） =====
+        function computeCRC32(data) {
+            const crcTable = new Uint32Array(256);
+            for (let i = 0; i < 256; i++) {
+                let c = i;
+                for (let j = 0; j < 8; j++) {
+                    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                }
+                crcTable[i] = c;
+            }
+            let crc = 0xFFFFFFFF;
+            for (let i = 0; i < data.length; i++) {
+                crc = crcTable[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+            }
+            return (crc ^ 0xFFFFFFFF) >>> 0;
+        }
+
+        // ===== 设备连接检查 =====
+        async function checkDevice() {
+            try {
+                const resp = await fetch('/api/status');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                if (data.data_source === 'active') {
+                    setStatus('设备已连接', 'connected');
+                } else {
+                    setStatus('设备未连接', 'disconnected');
+                }
+            } catch (err) {
+                setStatus('无法连接服务器', 'disconnected');
+            }
+        }
+        checkDevice();
+
+        // ===== 文件选择 =====
+        dropZone.addEventListener('click', () => fileInput.click());
+
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                handleFile(fileInput.files[0]);
+            }
+        });
+
+        async function handleFile(file) {
+            if (!file.name.endsWith('.py')) {
+                log('请选择 .py 文件', 'error');
+                return;
+            }
+
+            selectedFile = file;
+
+            // 读取文件并计算 CRC32
+            const data = await file.arrayBuffer();
+            const bytes = new Uint8Array(data);
+            const crc = computeCRC32(bytes);
+            const crcHex = crc.toString(16).toUpperCase().padStart(8, '0');
+
+            fileName.textContent = file.name;
+            fileSize.textContent = formatSize(bytes.length);
+            fileCrc.textContent = '0x' + crcHex;
+            fileInfo.style.display = 'block';
+            dropZone.classList.add('has-file');
+            uploadBtn.disabled = false;
+
+            log(`已选择: ${file.name} (${formatSize(bytes.length)}) CRC32=0x${crcHex}`, 'info');
+        }
+
+        // ===== 上传 =====
+        uploadBtn.addEventListener('click', async () => {
+            if (!selectedFile || isUploading) return;
+
+            isUploading = true;
+            uploadBtn.disabled = true;
+            resetBtn.disabled = true;
+            progressBar.classList.add('active');
+            progressFill.style.width = '0%';
+            setStatus('正在上传...', 'uploading');
+            log('开始上传到 RP2040...', 'info');
+
+            try {
+                const formData = new FormData();
+                formData.append('file', selectedFile);
+
+                const xhr = new XMLHttpRequest();
+
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const pct = Math.round((e.loaded / e.total) * 100);
+                        progressFill.style.width = pct + '%';
+                    }
+                };
+
+                const result = await new Promise((resolve, reject) => {
+                    xhr.onload = () => {
+                        try {
+                            resolve(JSON.parse(xhr.responseText));
+                        } catch (e) {
+                            reject(new Error('解析响应失败: ' + xhr.responseText));
+                        }
+                    };
+                    xhr.onerror = () => reject(new Error('网络错误'));
+                    xhr.ontimeout = () => reject(new Error('请求超时'));
+                    xhr.open('POST', '/api/upload', true);
+                    xhr.timeout = 60000;
+                    xhr.send(formData);
+                });
+
+                progressFill.style.width = '100%';
+
+                if (result.success) {
+                    log(`✅ 上传成功！${result.bytes} bytes 已写入`, 'success');
+                    log('🔄 RP2040 正在重启，加载新固件...', 'info');
+                    setStatus('上传成功，设备重启中', 'connected');
+                } else {
+                    log(`❌ 上传失败: ${result.message}`, 'error');
+                    setStatus('上传失败', 'disconnected');
+                }
+
+            } catch (err) {
+                log(`❌ 错误: ${err.message}`, 'error');
+                setStatus('上传出错', 'disconnected');
+            } finally {
+                isUploading = false;
+                uploadBtn.disabled = true;
+                resetBtn.disabled = false;
+                // 5 秒后重新检查设备状态
+                setTimeout(checkDevice, 5000);
+            }
+        });
+
+        // ===== 重启设备 =====
+        resetBtn.addEventListener('click', async () => {
+            resetBtn.disabled = true;
+            log('发送重启命令...', 'info');
+            try {
+                const resp = await fetch('/api/reset', { method: 'POST' });
+                const data = await resp.json();
+                if (data.success) {
+                    log('✅ 重启命令已发送', 'success');
+                    log('等待设备重启...', 'info');
+                    setStatus('设备重启中', 'uploading');
+                } else {
+                    log(`❌ 重启失败: ${data.message}`, 'error');
+                }
+            } catch (err) {
+                log(`❌ 重启请求失败: ${err.message}`, 'error');
+            } finally {
+                setTimeout(() => { resetBtn.disabled = false; }, 3000);
+                setTimeout(checkDevice, 5000);
+            }
+        });
+
+        // 定期检查设备状态
+        setInterval(checkDevice, 10000);
+    </script>
+</body>
+</html>

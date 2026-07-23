@@ -99,3 +99,9 @@ Desktop.ini
 
 # Local dev tools
 /.ropeproject
+
+# MicroPico (Raspberry Pi Pico IDE config)
+.micropico
+
+# CircuitPython / MicroPython
+*.mpy

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Raspberry Pi RP2040 (0x2E8A) — 常见 PID -->
+    <usb-device vendor-id="11914" product-id="0x0005" />
+    <usb-device vendor-id="11914" product-id="0x000a" />
+    <usb-device vendor-id="11914" product-id="0x8015" />
+    <usb-device vendor-id="11914" product-id="0x8017" />
+
+    <!-- 通用 CDC ACM 设备 (Arduino 等) -->
+    <usb-device vendor-id="9025" product-id="0x0067" />   <!-- Arduino Uno R3 -->
+    <usb-device vendor-id="1027" product-id="0x24577" />  <!-- Arduino MKR series -->
+    <usb-device vendor-id="4292" product-id="0x6001" />   <!-- CP2102 串口 -->
+    <usb-device vendor-id="4292" product-id="0x7523" />   <!-- CH340 串口 -->
+</resources>
