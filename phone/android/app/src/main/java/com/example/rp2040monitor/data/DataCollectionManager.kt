@@ -29,11 +29,15 @@ import kotlinx.coroutines.withContext
  */
 class DataCollectionManager(
     private val context: Context,
-    private val dataSource: DataSource = FakeDataSource(),
+    dataSource: DataSource = FakeDataSource(),
     private val dataBuffer: DataBuffer = DataBuffer(maxSize = 60),
     private val onDataCollected: ((SensorData) -> Unit)? = null
 ) {
     private val dataLogger = DataLogger(context)
+
+    /** 当前数据源，@Volatile 确保采集循环能读到最新的切换 */
+    @Volatile
+    private var currentDataSource: DataSource = dataSource
 
     // ---- 对外暴露的 StateFlow ----
     private val _latestData = MutableStateFlow<SensorData?>(null)
@@ -53,6 +57,27 @@ class DataCollectionManager(
 
     // 内部跟踪当前选中的字段，用于决定 chartData 画哪个字段
     private var _selectedField = ""
+
+    /**
+     * 运行时切换数据源。
+     * 采集循环会在下一次迭代自动使用新数据源。
+     */
+    fun switchDataSource(newSource: DataSource) {
+        val old = currentDataSource
+        currentDataSource = newSource
+        // 释放旧数据源（如关闭 USB 端口），避免接口残留占用导致后续 claim 失败
+        if (old !== newSource) {
+            try {
+                old.close()
+            } catch (e: Exception) {
+                Log.w("DataCollectionManager", "关闭旧数据源异常", e)
+            }
+        }
+        Log.i("DataCollectionManager", "数据源已切换: ${newSource::class.simpleName}")
+    }
+
+    /** 当前是否使用真实数据源（非 FakeDataSource） */
+    fun isRealDataSource(): Boolean = currentDataSource !is FakeDataSource
 
     /**
      * 由外部切换图表展示的字段
@@ -78,7 +103,7 @@ class DataCollectionManager(
         while (true) {
             try {
                 // 1. 从数据源采集
-                val data = dataSource.generate()
+                val data = currentDataSource.generate()
 
                 // 2. 写内存缓冲（图表 + API 用）
                 dataBuffer.append(data)

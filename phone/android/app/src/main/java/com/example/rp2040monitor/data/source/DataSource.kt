@@ -24,4 +24,11 @@ interface DataSource {
      * 获取当前可用的字段名列表
      */
     fun currentFieldNames(): List<String>
+
+    /**
+     * 释放资源（如关闭 USB 端口）。
+     * 切换数据源时由 [com.example.rp2040monitor.data.DataCollectionManager] 调用，
+     * 避免 USB 接口被旧数据源一直占用导致后续 claim 失败。
+     */
+    fun close() {}
 }

@@ -2,6 +2,7 @@ package com.example.rp2040monitor.data.source
 
 import android.content.Context
 import android.util.Log
+import com.example.rp2040monitor.data.EchoLog
 import com.example.rp2040monitor.data.model.SensorData
 import com.example.rp2040monitor.data.usb.UsbSerialManager
 import com.google.gson.JsonParser
@@ -60,12 +61,15 @@ class CdcDataSource(
     private fun connect(): Boolean {
         if (port != null) return true
 
+        EchoLog.log("⏳ 正在连接 USB 串口…")
         val acquiredPort = manager.acquire(baudRate)
         port = acquiredPort
         if (acquiredPort == null) {
+            EchoLog.log("❌ 无法获取 USB 串口（详见上方日志）")
             Log.w(TAG, "无法获取 USB 串口")
             return false
         }
+        EchoLog.log("✅ USB 串口已连接 @ ${baudRate}bps")
         Log.i(TAG, "USB 串口已连接 @ ${baudRate}bps")
         return true
     }
@@ -112,25 +116,29 @@ class CdcDataSource(
         )
 
         return try {
-            // ---- 第 1 步：发送 "GET" 命令 ----
-            val command = "GET"
+            // ---- 第 1 步：发送 "get" 命令（固件要求以换行符结尾才执行） ----
+            val command = "get\r\n"
             currentPort.write(command.toByteArray(StandardCharsets.US_ASCII), 500)
+            EchoLog.log("→ 发送命令: get + CRLF")
             Log.d(TAG, "已发送: $command")
 
             // ---- 第 2 步：读取 JSON 响应 ----
             val response = readJsonLine(currentPort)
             if (response.isNullOrBlank()) {
+                EchoLog.log("⚠️ 收到空响应（2s 超时，固件未回复）")
                 Log.w(TAG, "收到空响应")
                 return SensorData(
                     fields = emptyMap(),
                     status = "EMPTY_RESPONSE"
                 )
             }
+            EchoLog.log("← 收到数据(${response.length} 字符): ${response.take(200)}")
 
             // ---- 第 3 步：解析 JSON ----
             parseJsonToSensorData(response)
 
         } catch (e: Exception) {
+            EchoLog.log("❌ 采集异常: ${e.message ?: "未知错误"}")
             Log.e(TAG, "采集异常，尝试重连", e)
             disconnect()
             SensorData(
@@ -143,6 +151,14 @@ class CdcDataSource(
     override fun currentFieldNames(): List<String> {
         // 无法预知字段名，返回空列表由上层通过实际数据推断
         return emptyList()
+    }
+
+    /**
+     * 释放串口资源。切换数据源（如切回模拟数据）时调用，
+     * 确保 USB 接口被正确释放，否则残留连接会占用接口导致下次 claim 失败。
+     */
+    override fun close() {
+        disconnect()
     }
 
     // ---------------------------------------------------------------
@@ -175,6 +191,7 @@ class CdcDataSource(
                     if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
                         try {
                             JsonParser.parseString(cleaned)
+                            EchoLog.log("✓ 已识别到完整 JSON，长度=${cleaned.length}")
                             Log.d(TAG, "JSON 解析成功，长度=${cleaned.length}")
                             return cleaned
                         } catch (_: JsonSyntaxException) {
