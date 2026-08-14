@@ -48,6 +48,19 @@
                 </div>
             </section>
 
+            <!-- 数据源切换（fake / cdc） -->
+            <section class="card">
+                <h2>数据源</h2>
+                <div class="source-toggle">
+                    <span class="source-mode-name" id="sourceModeValue">--</span>
+                    <label class="switch">
+                        <input type="checkbox" id="sourceToggle">
+                        <span class="slider"></span>
+                    </label>
+                    <span class="source-toggle-hint">开 = 真实数据 (USB CDC) / 关 = 模拟数据 (Fake)</span>
+                </div>
+            </section>
+
             <!-- 实时数据 -->
             <section class="card">
                 <h2>实时数据</h2>

@@ -26,9 +26,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import com.example.rp2040monitor.data.DataCollectionManager
 import com.example.rp2040monitor.display.local.screen.MonitorScreen
 import com.example.rp2040monitor.theme.MyApplicationTheme
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -69,6 +72,10 @@ class MainActivity : ComponentActivity() {
             collectionManager = service!!.collectionManager
             isReady = true
             serviceBound = true
+            // 订阅数据源模式：web / 服务端切换数据源时，手机端开关同步
+            lifecycleScope.launch {
+                service?.dataSourceMode?.collect { isRealData = it }
+            }
             Log.i(TAG, "服务已绑定")
         }
 

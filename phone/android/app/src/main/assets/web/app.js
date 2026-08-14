@@ -23,6 +23,8 @@ const dataSource = $('dataSource');
 const fieldCount = $('fieldCount');
 const updateTime = $('updateTime');
 const appVersion = $('appVersion');
+const sourceToggle = $('sourceToggle');
+const sourceModeValue = $('sourceModeValue');
 const fieldSelector = $('fieldSelector');
 const canvas = $('trendChart');
 const ctx = canvas.getContext('2d');
@@ -185,6 +187,18 @@ function updateStatus(data) {
     dataSource.textContent = data.data_source || '--';
     fieldCount.textContent = data.field_count ?? '--';
     appVersion.textContent = data.version || '--';
+
+    // 数据源模式（fake/cdc）——与手机端开关同步
+    const mode = data.source_mode || 'unknown';
+    const isCdc = mode === 'cdc';
+    if (sourceModeValue) {
+        sourceModeValue.textContent = isCdc ? '真实数据 (USB CDC)' : '模拟数据 (Fake)';
+        sourceModeValue.style.color = isCdc ? 'var(--accent)' : 'var(--text-secondary)';
+    }
+    // 轮询刷新时，避免覆盖用户正在操作的开关
+    if (sourceToggle && !sourceSwitching && sourceToggle.checked !== isCdc) {
+        sourceToggle.checked = isCdc;
+    }
 }
 
 function updateFieldSelector(fields) {
@@ -290,6 +304,38 @@ fieldSelector.addEventListener('change', async (e) => {
         console.error('切换字段失败', err);
     }
 });
+
+// ===== 数据源切换（fake / cdc，与手机端双向同步） =====
+let sourceSwitching = false;
+
+if (sourceToggle) {
+    sourceToggle.addEventListener('change', async (e) => {
+        if (sourceSwitching) return;
+        const useCdc = e.target.checked;
+        const target = useCdc ? 'cdc' : 'fake';
+        sourceSwitching = true;
+        sourceToggle.disabled = true;
+        try {
+            const resp = await fetch(`${state.serverUrl}/api/datasource`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: 'source=' + encodeURIComponent(target)
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            // 刷新一次状态，让 source_mode / 手机端同步
+            await pollAll();
+        } catch (err) {
+            console.error('切换数据源失败', err);
+            e.target.checked = !useCdc;   // 失败回滚
+            if (sourceModeValue) {
+                sourceModeValue.textContent = useCdc ? '模拟数据 (Fake)' : '真实数据 (USB CDC)';
+            }
+        } finally {
+            sourceToggle.disabled = false;
+            setTimeout(() => { sourceSwitching = false; }, 500);
+        }
+    });
+}
 
 // ===== 窗口大小变化 =====
 let resizeTimer;

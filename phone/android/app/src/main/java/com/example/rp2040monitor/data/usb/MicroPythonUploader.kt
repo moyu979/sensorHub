@@ -2,6 +2,7 @@ package com.example.rp2040monitor.data.usb
 
 import android.util.Base64
 import android.util.Log
+import com.example.rp2040monitor.data.EchoLog
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -55,17 +56,21 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
             "def _rc():\n" +
             " tn=sys.stdin.readline().strip()\n" +
             " if not tn:print('ERR:NF');return\n" +
+            " print('MT:'+tn)\n" +
             " sl=sys.stdin.readline().strip()\n" +
             " try:fs=int(sl)\n" +
             " except:print('ERR:IS');return\n" +
+            " print('MS:'+sl)\n" +
             " cl=sys.stdin.readline().strip()\n" +
             " try:ec=int(cl,16)\n" +
             " except:print('ERR:IC');return\n" +
+            " print('MC:'+cl)\n" +
             " tp=tn+'.tmp'\n" +
             " try:\n" +
             "  if tp in os.listdir():os.remove(tp)\n" +
             " except:pass\n" +
             " br=0\n" +
+            " n=0\n" +
             " try:\n" +
             "  with open(tp,'wb') as f:\n" +
             "   while True:\n" +
@@ -77,7 +82,9 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
             "    except:print('ERR:BD');return\n" +
             "    f.write(ck)\n" +
             "    br+=len(ck)\n" +
+            "    n+=1\n" +
             "    gc.collect()\n" +
+            "  print('CH:'+str(n)+':'+str(br))\n" +
             " except Exception as e:print('ERR:'+str(e));return\n" +
             " ac=0\n" +
             " try:\n" +
@@ -100,8 +107,7 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
             "  os.rename(tp,tn)\n" +
             "  print('OK:%s updated (%db CRC=%08X)'%(tn,br,ac))\n" +
             " except Exception as e:print('ERR:RN:'+str(e))\n" +
-            "sys.stdout.write('READY\\r\\n')\n" +
-            "sys.stdout.flush()\n" +
+            "sys.stdout.write('RDRDY1\\r\\n')\n" +
             "_rc()\n"
         )
     }
@@ -129,12 +135,14 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
      */
     fun upload(fileData: ByteArray, remotePath: String): UploadResult {
         return try {
-            // 1. 进入 RAW REPL
-            enterRawRepl()
+            // 1. 进入 RAW REPL（严格校验，失败即中止）
+            if (!enterRawRepl()) {
+                return UploadResult.fail("无法进入 RAW REPL（设备可能卡死或未连接，请重启设备后重试）")
+            }
 
             // 2. 部署接收脚本
             if (!deployReceiver()) {
-                return UploadResult.fail("脚本部署失败：未收到 READY 信号")
+                return UploadResult.fail("脚本部署失败：未收到接收脚本就绪信号")
             }
 
             // 3. 发送元数据：文件名、大小、CRC32
@@ -157,32 +165,42 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
     // ================================================================
 
     /**
-     * 进入 RAW REPL 模式
+     * 进入 RAW REPL 模式，严格校验是否真正进入。
      *
      * 时序：
-     *   TX: Ctrl-C × 2 (中断当前操作)
+     *   TX: Ctrl-C × 2 (中断当前程序)
      *   TX: Ctrl-A (进入 RAW REPL)
      *   RX: "raw REPL; CTRL-B to exit\r\n>"
+     *
+     * 注意：若未真正进入 RAW REPL，后续 Ctrl-D 会变成“软重启”，
+     * 导致固件重启并打印 READY，与部署脚本的 READY 混淆（假 READY）。
+     * 因此这里必须确认收到 "raw REPL" 才算成功。
      */
-    private fun enterRawRepl() {
-        // 先中断任何正在运行的程序
-        writeByte(CTRL_C)
-        sleep(80)
-        writeByte(CTRL_C)
-        sleep(150)
-
-        // 清空缓冲区
+    private fun enterRawRepl(): Boolean {
+        repeat(2) {
+            writeByte(CTRL_C)
+            sleep(100)
+        }
         drainReader()
 
-        // 进入 RAW REPL
-        writeByte(CTRL_A)
-        sleep(300)
-
-        val response = readUntil(0x3E.toByte(), TIMEOUT_ENTER_REPL_MS)
-        if (!response.contains("raw REPL")) {
-            Log.w(TAG, "RAW REPL 响应异常，前 80 字符: ${response.take(80)}")
+        // 最多尝试 3 次进入 RAW REPL
+        for (attempt in 1..3) {
+            writeByte(CTRL_A)
+            sleep(300)
+            val response = readUntil(0x3E.toByte(), TIMEOUT_ENTER_REPL_MS)
+            if (response.contains("raw REPL")) {
+                EchoLog.log("✅ 第 $attempt 次尝试进入 RAW REPL 成功")
+                Log.i(TAG, "已进入 RAW REPL")
+                return true
+            }
+            EchoLog.log("⚠️ 第 $attempt 次进入 RAW REPL 失败，响应: ${response.take(60).replace("\n", " ")}")
+            // 未进入：中断后清缓冲重试
+            writeByte(CTRL_C)
+            sleep(100)
+            drainReader()
         }
-        Log.i(TAG, "已进入 RAW REPL")
+        EchoLog.log("❌ 连续 3 次无法进入 RAW REPL")
+        return false
     }
 
     /**
@@ -198,15 +216,24 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
         writeByte(CTRL_D)
         sleep(500)
 
+        // 等接收脚本打印的独特就绪标记 RDRDY1（避免与固件输出的 READY 混淆）
         val response = readUntil(
-            "READY".toByteArray(StandardCharsets.US_ASCII),
+            "RDRDY1".toByteArray(StandardCharsets.US_ASCII),
             TIMEOUT_SCRIPT_MS
         )
-        val ready = response.contains("READY")
+        val ready = response.contains("RDRDY1")
         if (!ready) {
-            Log.e(TAG, "未收到 READY，响应: ${response.take(200)}")
+            EchoLog.log("❌ 未收到接收脚本就绪标记，响应: ${response.take(150).replace("\n", " ")}")
+            Log.e(TAG, "未收到 RDRDY1，响应: ${response.take(200)}")
         } else {
-            Log.i(TAG, "接收脚本已部署，收到 READY")
+            // 打印完整响应：若 RDRDY1 后紧跟 ERR:NF / traceback（被同一 read 缓冲吞掉时
+            // readFinalResult 会显示 长度=0），这里能看到设备到底在 _rc() 里说了什么
+            EchoLog.log("✅ 接收脚本已部署，收到 RDRDY1；完整响应: ${response.take(200).replace("\n", " ")}")
+            Log.i(TAG, "接收脚本已部署，收到 RDRDY1；完整响应: ${response.take(200)}")
+            // 等待设备端 _rc() 完全进入 readline 状态，
+            // 避免随后发送的数据被 RAW REPL 的输入模式当代码缓冲。
+            // 加大到 800ms：给 _rc() 更多时间从 RDRDY1 打印走到 readline 阻塞。
+            sleep(800)
         }
         return ready
     }
@@ -266,18 +293,22 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
             response.contains("OK:") -> {
                 val match = Regex("""(\d+)b""").find(response)
                 val bytes = match?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                EchoLog.log("✅ 设备端确认写入成功: $bytes bytes")
                 UploadResult.ok(bytes)
             }
             response.contains("CRC_FAIL") -> {
+                EchoLog.log("❌ 设备端 CRC 校验失败: ${response.take(120)}")
                 UploadResult.fail("CRC 校验失败: ${response.take(100)}")
             }
             response.contains("ERR:") -> {
                 val msg = Regex("""ERR:(.*?)(\r|\n|$)""")
                     .find(response)?.groupValues?.get(1) ?: response.take(100)
+                EchoLog.log("❌ 设备端错误: $msg")
                 UploadResult.fail("设备错误: $msg")
             }
             else -> {
-                UploadResult.fail("未知响应: ${response.take(200)}")
+                EchoLog.log("❌ 未识别设备响应（长度=${response.length}）: ${response.take(120).replace("\n", " ")}")
+                UploadResult.fail("未知响应(长度=${response.length}): ${response.take(200)}")
             }
         }
     }
@@ -288,6 +319,10 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
      */
     fun softReset() {
         try {
+            // RAW REPL 中 Ctrl-D 是“提交执行缓冲”，不是软重启（软重启 Ctrl-D 是普通 REPL 的行为）。
+            // 正确做法：在 RAW REPL 里执行 machine.reset() 触发软重启，加载新的 main.py。
+            val cmd = "machine.reset()\n".toByteArray(StandardCharsets.UTF_8)
+            port.write(cmd, 500)
             writeByte(CTRL_D)
             sleep(600)
             Log.i(TAG, "已发送软重启命令")
@@ -313,12 +348,28 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
     // ================================================================
 
     private fun writeByte(b: Int) {
-        port.write(byteArrayOf(b.toByte()), 500)
+        writeAll(byteArrayOf(b.toByte()))
     }
 
     private fun writeLine(line: String) {
-        val data = "$line\r\n".toByteArray(StandardCharsets.UTF_8)
-        port.write(data, 1000)
+        // RAW REPL 环境下用 \n 作行尾更安全：某些 MicroPython 版本会把 \r
+        // 当作“提交当前行”，导致发送给 readline 的数据进错缓冲
+        val data = "$line\n".toByteArray(StandardCharsets.UTF_8)
+        writeAll(data)
+    }
+
+    /**
+     * 写入整块数据。
+     *
+     * usb-serial-for-anroid 的 write 返回 void，库内部负责完整写入，
+     * 写不完会抛 SerialTimeoutException，这里转成 IOException 便于上层识别。
+     */
+    private fun writeAll(data: ByteArray) {
+        try {
+            port.write(data, 1000)
+        } catch (e: com.hoho.android.usbserial.driver.SerialTimeoutException) {
+            throw java.io.IOException("串口写入超时: ${e.message}")
+        }
     }
 
     /**
@@ -341,7 +392,15 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
                     }
                 }
             } catch (e: Exception) {
-                break
+                // 不静默中断：记录异常并重试到超时。
+                // 连接瞬断/设备复位（如供电不足掉电）时 read 会抛异常，
+                // 直接 break 会掩盖真实原因（表现为“未知响应(长度=0)”）。
+                EchoLog.log("⚠️ 读取串口异常: ${e.javaClass.simpleName}: ${e.message}")
+                try {
+                    Thread.sleep(200)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
             }
         }
         return baos.toString(StandardCharsets.UTF_8.name())
@@ -366,7 +425,13 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
                     }
                 }
             } catch (e: Exception) {
-                break
+                // 不静默中断：记录异常并重试到超时（原因同上）
+                EchoLog.log("⚠️ 读取串口异常: ${e.javaClass.simpleName}: ${e.message}")
+                try {
+                    Thread.sleep(200)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
             }
         }
         return baos.toString(StandardCharsets.UTF_8.name())

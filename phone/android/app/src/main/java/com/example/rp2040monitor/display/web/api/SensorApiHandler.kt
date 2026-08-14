@@ -17,7 +17,8 @@ import com.google.gson.GsonBuilder
  */
 class SensorApiHandler(
     private val dataBuffer: DataBuffer,
-    private val dataLogger: DataLogger? = null
+    private val dataLogger: DataLogger? = null,
+    private val sourceMode: () -> String = { "unknown" }
 ) {
 
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
@@ -150,6 +151,7 @@ class SensorApiHandler(
             "app" to "sensorHub",
             "version" to "1.0",
             "data_source" to if (hasData) "active" else "idle",
+            "source_mode" to sourceMode(),
             "field_count" to fieldCount,
             "fields" to dataBuffer.fieldNames().sorted(),
             "buffer_size" to 60

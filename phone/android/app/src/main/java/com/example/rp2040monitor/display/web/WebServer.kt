@@ -38,6 +38,22 @@ data class ResetResult(
 )
 
 /**
+ * 数据源查询/切换的回调
+ */
+interface DataSourceHandler {
+    /** 查询当前数据源模式 */
+    fun current(): DataSourceResult
+    /** 切换数据源：true=真实(CDC)，false=模拟(Fake) */
+    fun set(useReal: Boolean): DataSourceResult
+}
+
+data class DataSourceResult(
+    val success: Boolean,
+    val message: String,
+    val source: String   // "cdc" 或 "fake"
+)
+
+/**
  * 嵌入式 Web 服务器
  *
  * 基于 NanoHTTPD 实现，提供:
@@ -59,10 +75,13 @@ class WebServer(
     private val assetManager: AssetManager,
     private val dataLogger: DataLogger? = null,
     private val uploadHandler: UploadHandler? = null,
-    private val resetHandler: ResetHandler? = null
+    private val resetHandler: ResetHandler? = null,
+    private val dataSourceHandler: DataSourceHandler? = null
 ) : NanoHTTPD(port) {
 
-    private val apiHandler = SensorApiHandler(dataBuffer, dataLogger)
+    private val apiHandler = SensorApiHandler(dataBuffer, dataLogger) {
+        dataSourceHandler?.current()?.source ?: "unknown"
+    }
 
     companion object {
         private const val TAG = "WebServer"
@@ -89,6 +108,13 @@ class WebServer(
                 // ---- 设备重启 ----
                 uri == "/api/reset" && method == Method.POST -> {
                     handleReset()
+                }
+                // ---- 数据源查询/切换 ----
+                uri == "/api/datasource" && method == Method.GET -> {
+                    handleDataSourceGet()
+                }
+                uri == "/api/datasource" && method == Method.POST -> {
+                    handleDataSourcePost(session)
                 }
                 // ---- OTA 升级页面 ----
                 (uri == "/update" || uri == "/upload") -> {
@@ -151,17 +177,22 @@ class WebServer(
                 return jsonResponse(400, """{"success":false,"message":"未找到上传文件"}""")
             }
 
-            // 从 multipart 头部提取文件名
+            // 从 multipart 头部提取文件名（去掉可能的路径前缀，防路径穿越）
             val headers = session.headers
             val disposition = headers["content-disposition"] ?: ""
-            val fileName = Regex("""filename="?(.+?)"?(\s|$)""")
+            val rawName = Regex("""filename="?(.+?)?"?(\s|$)""")
                 .find(disposition)
                 ?.groupValues?.get(1)
+                ?.trim()
                 ?: "main.py"
+            val fileName = rawName
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+                .ifBlank { "main.py" }
 
-            // 读取文件内容
-            val fileContent = fileEntry.value
-            val fileData = fileContent.toByteArray(StandardCharsets.UTF_8)
+            // 读取文件内容：NanoHTTPD 的 files 值是“临时文件路径”，必须读文件本身
+            // （否则上传给设备的是路径字符串而非固件内容，CRC 还会“假通过”）
+            val fileData = java.io.File(fileEntry.value).readBytes()
 
             if (fileData.isEmpty()) {
                 return jsonResponse(400, """{"success":false,"message":"文件内容为空"}""")
@@ -174,7 +205,7 @@ class WebServer(
 
             val json = """{
                 "success": ${result.success},
-                "message": "${result.message}",
+                "message": "${escapeJson(result.message)}",
                 "bytes": ${result.bytesUploaded}
             }""".trimIndent()
 
@@ -203,6 +234,49 @@ class WebServer(
             jsonResponse(if (result.success) 200 else 500, json)
         } catch (e: Exception) {
             Log.e(TAG, "重启异常", e)
+            jsonResponse(500, """{"success":false,"message":"${e.message}"}""")
+        }
+    }
+
+    // ==================== 数据源切换 ====================
+
+    /**
+     * 查询当前数据源模式
+     */
+    private fun handleDataSourceGet(): Response {
+        val handler = dataSourceHandler
+        if (handler == null) {
+            return jsonResponse(503, """{"success":false,"message":"数据源切换功能未启用"}""")
+        }
+        val r = handler.current()
+        val json = """{"success":true,"source":"${r.source}","message":"${escapeJson(r.message)}"}"""
+        return jsonResponse(200, json)
+    }
+
+    /**
+     * 切换数据源
+     * POST body: source=fake | source=cdc
+     */
+    private fun handleDataSourcePost(session: IHTTPSession): Response {
+        val handler = dataSourceHandler
+        if (handler == null) {
+            return jsonResponse(503, """{"success":false,"message":"数据源切换功能未启用"}""")
+        }
+        return try {
+            // NanoHTTPD：urlencoded 的 POST 参数写进 session.parms（不是传入 parseBody 的 map），
+            // 必须先 parseBody 触发解析，再读 session.parms
+            session.parseBody(LinkedHashMap<String, String>())
+            val source = session.parameters["source"]?.firstOrNull()?.trim()?.lowercase()
+            val useReal = when (source) {
+                "cdc", "real", "usb", "true" -> true
+                "fake", "false" -> false
+                else -> return jsonResponse(400, """{"success":false,"message":"未知数据源: $source"}""")
+            }
+            val r = handler.set(useReal)
+            val json = """{"success":${r.success},"source":"${r.source}","message":"${escapeJson(r.message)}"}"""
+            jsonResponse(if (r.success) 200 else 500, json)
+        } catch (e: Exception) {
+            Log.e(TAG, "数据源切换异常", e)
             jsonResponse(500, """{"success":false,"message":"${e.message}"}""")
         }
     }

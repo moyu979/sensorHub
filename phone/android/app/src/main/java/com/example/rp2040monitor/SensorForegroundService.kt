@@ -17,6 +17,8 @@ import com.example.rp2040monitor.data.source.CdcDataSource
 import com.example.rp2040monitor.data.source.FakeDataSource
 import com.example.rp2040monitor.data.usb.MicroPythonUploader
 import com.example.rp2040monitor.data.usb.UsbSerialManager
+import com.example.rp2040monitor.display.web.DataSourceHandler
+import com.example.rp2040monitor.display.web.DataSourceResult
 import com.example.rp2040monitor.display.web.ResetHandler
 import com.example.rp2040monitor.display.web.ResetResult
 import com.example.rp2040monitor.display.web.UploadHandler
@@ -27,7 +29,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 /**
  * 前台服务 —— 保活 Web 服务器 + 数据采集
@@ -109,7 +115,17 @@ class SensorForegroundService : Service() {
     /** USB 串口管理器 */
     val usbSerialManager: UsbSerialManager by lazy { UsbSerialManager(this) }
 
+    /** 当前数据源模式：true=真实(USB CDC)，false=模拟(Fake)；供手机 UI 与 web 双向同步 */
+    private val _dataSourceMode = MutableStateFlow(false)
+    val dataSourceMode: StateFlow<Boolean> = _dataSourceMode.asStateFlow()
+
     private var webServer: WebServer? = null
+
+    /** 串口互斥锁：同一时刻只允许一个上传/重启操作使用串口 */
+    private val serialLock = Any()
+
+    /** 采集协程；@Volatile 供后台线程（上传/重启）与主线程安全访问 */
+    @Volatile
     private var collectionJob: Job? = null
 
     override fun onCreate() {
@@ -147,6 +163,15 @@ class SensorForegroundService : Service() {
     // ================================================================
 
     private fun initAndStart() {
+        // 幂等保护：onStartCommand 可能因 Activity 重建 / START_STICKY 被重复调用。
+        // 若重复执行，会重建 collectionManager（清空内存缓冲 → 手机图表/字段下拉框消失，
+        // 而旧 WebServer 仍占着端口继续服务旧缓冲，造成"手机上没了、web 还在"），
+        // 并重复启动 WebServer（端口冲突）。因此只在首次初始化时创建子系统。
+        if (::collectionManager.isInitialized) {
+            Log.i(TAG, "子系统已初始化，跳过重复初始化（保护内存缓冲与 Web 服务器）")
+            return
+        }
+
         // 1. 创建采集管理器
         collectionManager = DataCollectionManager(
             context = this,
@@ -254,6 +279,7 @@ class SensorForegroundService : Service() {
             FakeDataSource()
         }
         collectionManager.switchDataSource(newSource)
+        _dataSourceMode.value = useReal
         Log.i(TAG, "数据源切换: ${if (useReal) "真实(USB CDC)" else "模拟(Fake)"}")
     }
 
@@ -269,6 +295,26 @@ class SensorForegroundService : Service() {
                 },
                 resetHandler = ResetHandler {
                     handleReset()
+                },
+                dataSourceHandler = object : DataSourceHandler {
+                    override fun current(): DataSourceResult {
+                        val isReal = isRealDataSource
+                        return DataSourceResult(
+                            success = true,
+                            message = if (isReal) "真实数据 (USB CDC)" else "模拟数据 (Fake)",
+                            source = if (isReal) "cdc" else "fake"
+                        )
+                    }
+
+                    override fun set(useReal: Boolean): DataSourceResult {
+                        switchDataSource(useReal)
+                        val nowReal = isRealDataSource
+                        return DataSourceResult(
+                            success = true,
+                            message = if (nowReal) "真实数据 (USB CDC)" else "模拟数据 (Fake)",
+                            source = if (nowReal) "cdc" else "fake"
+                        )
+                    }
                 }
             )
             server.start()
@@ -290,14 +336,32 @@ class SensorForegroundService : Service() {
     // ================================================================
 
     private fun startCollection() {
+        if (collectionJob?.isActive == true) return
         collectionJob = serviceScope.launch {
             collectionManager.collect()
         }
     }
 
+    /** 仅取消采集协程（不等待），用于服务销毁等无需立即让出串口的场景 */
     private fun stopCollection() {
         collectionJob?.cancel()
         collectionJob = null
+    }
+
+    /**
+     * 取消并等待采集协程完全退出（阻塞直到停止）。
+     *
+     * 采集协程会在串口上阻塞读写（最长约 2s），`cancel()` 只发取消请求、
+     * 不会立即停止；只有 `join()` 之后串口才真正空闲，可安全用于上传/重启。
+     * 必须在后台线程（NanoHTTPD worker）调用，禁止在主线程调用。
+     */
+    private fun stopCollectionAndJoin() {
+        val job = collectionJob
+        collectionJob = null
+        if (job != null) {
+            job.cancel()
+            runBlocking { job.join() }
+        }
     }
 
     // ================================================================
@@ -306,50 +370,62 @@ class SensorForegroundService : Service() {
 
     private fun handleUpload(fileData: ByteArray, fileName: String): UploadResult {
         Log.i(TAG, "OTA 上传请求: $fileName, ${fileData.size} bytes")
-        stopCollection()
 
-        return try {
-            val port = usbSerialManager.acquire()
-                ?: return UploadResult(false, "USB 设备未连接")
+        // 串口互斥：同一时刻只允许一个上传/重启操作使用串口（防并发上传/上传+重启）
+        synchronized(serialLock) {
+            // 取消并等待采集协程完全退出，确保采集不再读写串口后才开始上传
+            stopCollectionAndJoin()
 
-            val uploader = MicroPythonUploader(port)
-            val result = uploader.upload(fileData, fileName)
+            return try {
+                val port = usbSerialManager.acquire()
+                    ?: return UploadResult(false, "USB 设备未连接")
 
-            if (result.success) {
-                Log.i(TAG, "上传成功，发送软重启命令")
+                val uploader = MicroPythonUploader(port)
+                val result = uploader.upload(fileData, fileName)
+
+                // 无论成败都软重启：成功→加载新固件；失败→让设备恢复运行态（跑旧固件），
+                // 否则设备会一直停在 RAW REPL，导致后续数据采集收不到数据
+                if (result.success) {
+                    Log.i(TAG, "上传成功，发送软重启命令")
+                } else {
+                    Log.w(TAG, "上传失败，软重启恢复设备: ${result.message}")
+                }
                 uploader.softReset()
-            } else {
-                Log.w(TAG, "上传失败: ${result.message}")
-            }
 
-            UploadResult(result.success, result.message, result.bytesUploaded)
-        } catch (e: Exception) {
-            Log.e(TAG, "OTA 上传异常", e)
-            UploadResult(false, "异常: ${e.message ?: "未知错误"}")
-        } finally {
-            usbSerialManager.release()
-            startCollection()
+                UploadResult(result.success, result.message, result.bytesUploaded)
+            } catch (e: Exception) {
+                Log.e(TAG, "OTA 上传异常", e)
+                UploadResult(false, "异常: ${e.message ?: "未知错误"}")
+            } finally {
+                usbSerialManager.release()
+                startCollection()
+            }
         }
     }
 
     private fun handleReset(): ResetResult {
         Log.i(TAG, "设备重启请求")
-        stopCollection()
 
-        return try {
-            val port = usbSerialManager.acquire()
-                ?: return ResetResult(false, "USB 设备未连接")
+        // 串口互斥：与上传共用同一把锁，防止重启与上传同时操作串口
+        synchronized(serialLock) {
+            // 取消并等待采集协程完全退出，确保串口空闲
+            stopCollectionAndJoin()
 
-            val uploader = MicroPythonUploader(port)
-            uploader.softReset()
+            return try {
+                val port = usbSerialManager.acquire()
+                    ?: return ResetResult(false, "USB 设备未连接")
 
-            ResetResult(true, "重启命令已发送")
-        } catch (e: Exception) {
-            Log.e(TAG, "重启异常", e)
-            ResetResult(false, "异常: ${e.message ?: "未知错误"}")
-        } finally {
-            usbSerialManager.release()
-            startCollection()
+                val uploader = MicroPythonUploader(port)
+                uploader.softReset()
+
+                ResetResult(true, "重启命令已发送")
+            } catch (e: Exception) {
+                Log.e(TAG, "重启异常", e)
+                ResetResult(false, "异常: ${e.message ?: "未知错误"}")
+            } finally {
+                usbSerialManager.release()
+                startCollection()
+            }
         }
     }
 
