@@ -29,5 +29,10 @@ while True:
             print(ujson.dumps({
                 "error": "unknown command"
             }))
+    elif char == "\x03":
+        # 检测到 Ctrl-C（OTA 上传的中断信号）：主动退出到 REPL，
+        # 否则运行中的 read(1) 会把 0x03 当数据吞掉，设备无法再刷写。
+        print("\nCtrl-C received -> exit to REPL")
+        raise SystemExit
     else:
         buffer += char

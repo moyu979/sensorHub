@@ -28,6 +28,8 @@ const sourceModeValue = $('sourceModeValue');
 const fieldSelector = $('fieldSelector');
 const canvas = $('trendChart');
 const ctx = canvas.getContext('2d');
+const echoLog = $('echoLog');
+const clearLogBtn = $('clearLogBtn');
 
 // ===== 工具 =====
 function formatTime(ts) {
@@ -238,6 +240,24 @@ function updateRealtimeData(current) {
     container.innerHTML = html;
 }
 
+// 回显日志（网页端查看 USB/通信调试日志）
+async function updateEchoLog() {
+    if (!echoLog) return;
+    try {
+        const data = await apiFetch('/api/log');
+        const lines = data.lines || [];
+        const text = lines.join('\n');
+        // 仅在内容变化时更新并滚到底部，避免每次都重置滚动位置
+        if (echoLog.dataset.last !== text) {
+            echoLog.dataset.last = text;
+            echoLog.textContent = text || '（暂无日志）';
+            echoLog.scrollTop = echoLog.scrollHeight;
+        }
+    } catch (e) {
+        // 忽略，下一次轮询再试
+    }
+}
+
 function updateChart(fieldName, history) {
     state.selectedField = fieldName;
     state.historyData = history.data || [];
@@ -266,6 +286,9 @@ async function pollAll() {
 
         // 更新实时数据列表
         updateRealtimeData(current);
+
+        // 更新回显日志
+        updateEchoLog();
 
         // 更新字段列表
         const fields = status.fields || [];
@@ -304,6 +327,18 @@ fieldSelector.addEventListener('change', async (e) => {
         console.error('切换字段失败', err);
     }
 });
+
+// ===== 回显日志清空 =====
+if (clearLogBtn) {
+    clearLogBtn.addEventListener('click', async () => {
+        try {
+            await fetch(`${state.serverUrl}/api/log/clear`, { method: 'POST' });
+            await updateEchoLog();
+        } catch (e) {
+            console.error('清空回显日志失败', e);
+        }
+    });
+}
 
 // ===== 数据源切换（fake / cdc，与手机端双向同步） =====
 let sourceSwitching = false;

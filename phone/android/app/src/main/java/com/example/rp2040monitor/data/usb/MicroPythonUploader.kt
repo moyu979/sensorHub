@@ -177,30 +177,62 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
      * 因此这里必须确认收到 "raw REPL" 才算成功。
      */
     private fun enterRawRepl(): Boolean {
-        repeat(2) {
-            writeByte(CTRL_C)
+        return try {
+            // 0) 解锁：先发一个换行。若设备卡死在固件的阻塞 readline()（等 '\n'）上
+            //    （旧 m702a.py 的 bug），这个 '\n' 能让它返回主循环，否则后续 Ctrl-C
+            //    会被 readline 当普通数据吞掉、永远中断不了 → 进不了 RAW REPL。
+            //    对正常运行中的固件无害（空命令被忽略）。
+            try { writeLine("") } catch (_: Exception) {}
             sleep(100)
-        }
-        drainReader()
 
-        // 最多尝试 3 次进入 RAW REPL
-        for (attempt in 1..3) {
-            writeByte(CTRL_A)
-            sleep(300)
-            val response = readUntil(0x3E.toByte(), TIMEOUT_ENTER_REPL_MS)
-            if (response.contains("raw REPL")) {
-                EchoLog.log("✅ 第 $attempt 次尝试进入 RAW REPL 成功")
-                Log.i(TAG, "已进入 RAW REPL")
-                return true
-            }
-            EchoLog.log("⚠️ 第 $attempt 次进入 RAW REPL 失败，响应: ${response.take(60).replace("\n", " ")}")
-            // 未进入：中断后清缓冲重试
-            writeByte(CTRL_C)
-            sleep(100)
+            // 1) 若设备残留在 RAW REPL（如上次上传异常没退出来），先 Ctrl-B 退回普通 REPL。
+            //    注意：已经在 RAW REPL 时再发 Ctrl-A 不会重新打印 "raw REPL" banner，
+            //    readUntil 检测会一直失败，所以必须先 Ctrl-B 退出。
+            writeByte(CTRL_B)
+            sleep(200)
             drainReader()
+
+            // 2) Ctrl-C 中断任何正在运行的程序（多按几次，覆盖各种状态）
+            repeat(3) {
+                writeByte(CTRL_C)
+                sleep(120)
+            }
+            drainReader()
+
+            // 3) 最多尝试 3 次进入 RAW REPL
+            for (attempt in 1..3) {
+                writeByte(CTRL_A)
+                sleep(300)
+                val response = readUntil(0x3E.toByte(), TIMEOUT_ENTER_REPL_MS)
+                if (response.contains("raw REPL")) {
+                    EchoLog.log("✅ 第 $attempt 次尝试进入 RAW REPL 成功")
+                    Log.i(TAG, "已进入 RAW REPL")
+                    return true
+                }
+                EchoLog.log("⚠️ 第 $attempt 次进入 RAW REPL 失败，响应(${response.length}): ${response.take(300).replace("\n", " ")}")
+
+                // 探测设备状态：发一个回车。若设备在普通 REPL，会回新的 ">>> " 提示符，
+                // 用于区分"设备卡死无响应" vs "设备活着但 Ctrl-A 没进 RAW REPL"。
+                // （回显里能看到这个探测响应，直接据此定位设备到底处于什么状态）
+                try { writeLine("") } catch (_: Exception) {}
+                sleep(200)
+                val probe = readUntil(0x3E.toByte(), 1500)
+                EchoLog.log("   探测响应(${probe.length}): ${probe.take(200).replace("\n", " ")}")
+
+                // 未进入：中断后清缓冲重试
+                writeByte(CTRL_C)
+                sleep(150)
+                drainReader()
+            }
+            EchoLog.log("❌ 连续 3 次无法进入 RAW REPL（建议拔插 USB / 按 RESET 重启设备后重试）")
+            false
+        } catch (e: Exception) {
+            // USB 传输层异常（如 rc=-1 = 设备无响应/掉线/供电不足导致 USB 断开）。
+            // 这里吞掉并给出明确提示，避免底层 "Error writing ... rc=-1" 冒泡成难看的错误。
+            EchoLog.log("❌ USB 写入/读取失败（设备无响应/掉线/供电不足），请重启设备后重试: ${e.javaClass.simpleName}: ${e.message}")
+            Log.e(TAG, "enterRawRepl USB 异常", e)
+            false
         }
-        EchoLog.log("❌ 连续 3 次无法进入 RAW REPL")
-        return false
     }
 
     /**
@@ -324,7 +356,9 @@ class MicroPythonUploader(private val port: UsbSerialPort) {
             val cmd = "machine.reset()\n".toByteArray(StandardCharsets.UTF_8)
             port.write(cmd, 500)
             writeByte(CTRL_D)
-            sleep(600)
+            // 给设备充足的重启时间（MicroPython 重启 + 跑 main.py + 打印 READY），
+            // 避免恢复采集时设备还在启动、命令被当代码求值（NameError/PARSE_ERROR）。
+            sleep(1500)
             Log.i(TAG, "已发送软重启命令")
         } catch (e: Exception) {
             Log.w(TAG, "软重启异常", e)

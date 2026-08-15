@@ -116,6 +116,11 @@ class WebServer(
                 uri == "/api/datasource" && method == Method.POST -> {
                     handleDataSourcePost(session)
                 }
+                // ---- 回显日志清空 ----
+                uri == "/api/log/clear" && method == Method.POST -> {
+                    com.example.rp2040monitor.data.EchoLog.clear()
+                    jsonResponse(200, """{"success":true,"message":"回显日志已清空"}""")
+                }
                 // ---- OTA 升级页面 ----
                 (uri == "/update" || uri == "/upload") -> {
                     serveStatic("upload.html")

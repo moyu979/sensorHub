@@ -381,7 +381,12 @@ class SensorForegroundService : Service() {
                     ?: return UploadResult(false, "USB 设备未连接")
 
                 val uploader = MicroPythonUploader(port)
-                val result = uploader.upload(fileData, fileName)
+                // 设备端文件名固定为 main.py：OTA 的目标是更新 MicroPython 自动
+                // 运行的入口脚本。若沿用浏览器上传的文件名（如 m702a.py、
+                // "main (1).py" 等），设备重启后 MicroPython 不运行它 → 停在普通
+                // REPL → Android 发 get 被当代码求值 → NameError → PARSE_ERROR。
+                val remotePath = "main.py"
+                val result = uploader.upload(fileData, remotePath)
 
                 // 无论成败都软重启：成功→加载新固件；失败→让设备恢复运行态（跑旧固件），
                 // 否则设备会一直停在 RAW REPL，导致后续数据采集收不到数据

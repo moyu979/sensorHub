@@ -68,6 +68,17 @@
                     <div class="empty">等待数据...</div>
                 </div>
             </section>
+
+            <!-- 回显日志（USB/通信调试） -->
+            <section class="card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h2 style="margin:0;">回显日志</h2>
+                    <button id="clearLogBtn" class="history-btn" style="padding:2px 8px;">清空</button>
+                </div>
+                <div id="echoLog" class="realtime-data-list" style="height:200px; overflow-y:auto; font-family:monospace; font-size:12px; white-space:pre-wrap;">
+                    <div class="empty">等待日志...</div>
+                </div>
+            </section>
         </div>
 
         <!-- 图表区域 -->

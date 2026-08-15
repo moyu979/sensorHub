@@ -1,5 +1,6 @@
 package com.example.rp2040monitor.display.web.api
 
+import com.example.rp2040monitor.data.EchoLog
 import com.example.rp2040monitor.data.model.SensorData
 import com.example.rp2040monitor.data.storage.DataBuffer
 import com.example.rp2040monitor.data.storage.DataLogger
@@ -38,6 +39,7 @@ class SensorApiHandler(
             uri == "/api/history/query" -> handleHistoryQuery(queryParams)
             uri.startsWith("/api/history/") -> handleHistory(uri, queryParams)
             uri == "/api/status"  -> handleStatus()
+            uri == "/api/log"     -> handleLog()
             else -> ApiResult(404, """{"error":"not_found","message":"未知的 API 端点: $uri"}""")
         }
     }
@@ -155,6 +157,19 @@ class SensorApiHandler(
             "field_count" to fieldCount,
             "fields" to dataBuffer.fieldNames().sorted(),
             "buffer_size" to 60
+        ))
+        return ApiResult(200, json)
+    }
+
+    /**
+     * 回显日志（网页端查看 USB/通信调试日志）
+     * GET /api/log → {"count":N,"lines":["[HH:mm:ss.SSS] ...", ...]}
+     */
+    private fun handleLog(): ApiResult {
+        val lines = EchoLog.lines.value.takeLast(300)
+        val json = gson.toJson(mapOf(
+            "count" to lines.size,
+            "lines" to lines
         ))
         return ApiResult(200, json)
     }

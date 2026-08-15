@@ -118,11 +118,26 @@ class CdcDataSource(
         return try {
             // ---- 第 1 步：发送 "get" 命令（固件要求以换行符结尾才执行） ----
             val command = "get\r\n"
-            currentPort.write(command.toByteArray(StandardCharsets.US_ASCII), 500)
-            EchoLog.log("→ 发送命令: get + CRLF")
-            Log.d(TAG, "已发送: $command")
+            try {
+                currentPort.write(command.toByteArray(StandardCharsets.US_ASCII), 500)
+                EchoLog.log("→ 发送命令: get + CRLF")
+                Log.d(TAG, "已发送: $command")
+            } catch (e: Exception) {
+                // 写失败（多为 USB CDC OUT 缓冲瞬时占满 / 固件短暂未读）：
+                // 本轮按空响应处理、不断开重连。断开→重连本身有 claim 失败
+                // 风险且耗时（会加重“正在连接/initializing 反复刷屏”），
+                // 等下一轮重试即可。
+                EchoLog.log("⚠️ 写命令异常（本轮跳过，不重连）: ${e.javaClass.simpleName}: ${e.message ?: "未知"}")
+                Log.w(TAG, "写命令失败，按空响应处理", e)
+                return SensorData(
+                    fields = emptyMap(),
+                    status = "EMPTY_RESPONSE"
+                )
+            }
 
             // ---- 第 2 步：读取 JSON 响应 ----
+            // readJsonLine 内部把普通超时（无数据）转成 null → 空响应；
+            // 连接异常（设备掉线）会向上抛，由下方 catch 断开重连。
             val response = readJsonLine(currentPort)
             if (response.isNullOrBlank()) {
                 EchoLog.log("⚠️ 收到空响应（2s 超时，固件未回复）")
@@ -134,12 +149,34 @@ class CdcDataSource(
             }
             EchoLog.log("← 收到数据(${response.length} 字符): ${response.take(200)}")
 
+            // ---- 2.5) 设备停在 REPL 的检测与自动恢复 ----
+            // 若设备没有运行 main.py（停在普通/RAW REPL），Android 发的 "get"
+            // 会被 REPL 当代码求值 → "File <stdin>, line 1 ... NameError: name
+            // 'get' is not defined"（不是 main.py 在跑）。此时发 machine.reset()
+            // + Ctrl-D 软重启设备，让 main.py 自动跑起来，避免一直 PARSE_ERROR。
+            if (response.contains("NameError") ||
+                response.contains("<stdin>") ||
+                response.contains("Traceback")) {
+                EchoLog.log("⚠️ 设备停在 REPL（main.py 未运行），软重启设备以恢复采集…")
+                try {
+                    currentPort.write("machine.reset()\n".toByteArray(StandardCharsets.US_ASCII), 500)
+                    currentPort.write(byteArrayOf(4), 500)   // Ctrl-D：普通 REPL=软重启 / RAW REPL=提交执行
+                } catch (e: Exception) {
+                    Log.w(TAG, "发送软重启命令异常", e)
+                }
+                return SensorData(
+                    fields = emptyMap(),
+                    status = "REPL_RESET"
+                )
+            }
+
             // ---- 第 3 步：解析 JSON ----
             parseJsonToSensorData(response)
 
         } catch (e: Exception) {
-            EchoLog.log("❌ 采集异常: ${e.message ?: "未知错误"}")
-            Log.e(TAG, "采集异常，尝试重连", e)
+            // 走到这里 = read 阶段连接异常（设备掉线 / 连接断开），此时才断开重连。
+            EchoLog.log("❌ 读取连接异常，准备重连: ${e.javaClass.simpleName}: ${e.message ?: "未知错误"}")
+            Log.e(TAG, "读取异常，尝试重连", e)
             disconnect()
             SensorData(
                 fields = emptyMap(),
@@ -185,9 +222,9 @@ class CdcDataSource(
 
                     // 尝试解析当前累积的数据
                     val raw = baos.toString(StandardCharsets.UTF_8.name())
-                    val cleaned = raw.trim()
 
-                    // 如果包含完整 JSON 对象，尝试解析
+                    // 优先：整段内容就是一个完整 JSON（固件正常 print 一行 JSON 时）
+                    val cleaned = raw.trim()
                     if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
                         try {
                             JsonParser.parseString(cleaned)
@@ -195,7 +232,23 @@ class CdcDataSource(
                             Log.d(TAG, "JSON 解析成功，长度=${cleaned.length}")
                             return cleaned
                         } catch (_: JsonSyntaxException) {
-                            // 不完整的 JSON，继续读取
+                            // 整段不是合法 JSON，继续尝试提取
+                        }
+                    }
+
+                    // 兜底：从最后一个 '{' 截到最后一个 '}' 提取 JSON 对象，
+                    // 容忍响应流里混入非 JSON 输出（如固件的调试 print）。
+                    val lastOpen = raw.lastIndexOf('{')
+                    val lastClose = raw.lastIndexOf('}')
+                    if (lastOpen >= 0 && lastClose > lastOpen) {
+                        val candidate = raw.substring(lastOpen, lastClose + 1)
+                        try {
+                            JsonParser.parseString(candidate)
+                            EchoLog.log("✓ 已识别到完整 JSON（含前导输出），长度=${candidate.length}")
+                            Log.d(TAG, "JSON 解析成功（提取），长度=${candidate.length}")
+                            return candidate
+                        } catch (_: JsonSyntaxException) {
+                            // 仍不完整，继续读取
                         }
                     }
                 } else if (len == 0 && baos.size() > 0) {
@@ -203,8 +256,10 @@ class CdcDataSource(
                     break
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "读取串口异常", e)
-                break
+                // 连接类异常（设备掉线/连接断开）向上抛，由 generate() 决定断开重连；
+                // 普通超时不会走到这里（usb-serial 的 read 超时返回 0，不抛异常）。
+                Log.w(TAG, "读取串口异常（连接异常，上抛触发重连）", e)
+                throw e
             }
         }
 
